@@ -1,0 +1,810 @@
+---
+title: "Predict Injury from Crowdsourced Bike Incidents"
+date: "2023-12-14"
+output: 
+  html_document:
+    theme: flatly
+    code_folding: hide
+    toc: yes
+    toc_float:
+      collapsed: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{=html}
+<style>
+body {
+text-align: justify}
+</style>
+```
+
+------------------------------------------------------------------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE,
+                      fig.align = "center")
+```
+
+```{r,echo=FALSE}
+#install.packages("prettydoc")
+#install.packages("tidyverse")
+#install.packages("tidymodels")
+#install.packages("kknn")
+#install.packages("yardstick")
+#install.packages("ggplot2")
+#install.packages("ggcorrplot")
+library(prettydoc)
+library(ggplot2); theme_set(theme_minimal())
+library(tidyverse)
+library(tidymodels)
+library(viridis)
+tidymodels_prefer()
+```
+
+![photo credits: BBC](image/bike1.jpeg)
+
+## Introduction
+
+The aim of this project is to predict whether a bicyclist will injure
+from a bike incident or not. I use crowdsourced near-miss and collision
+data from bikemaps.org. Bikemaps.org is crowsourcing platform where
+bicyclists can map their incidents and record relevant information,
+including collision/near-miss details, environmental conditions,
+personal info and injury level. Four machine learning models are applied
+to yield the most accurate model for this binary classification problem.
+
+### Motivation
+
+Biking is sustainable transportation mode growing more and more popular
+these days. However, bicyclists are one of the most vulnerable road user
+group in daily travel. I want to predict whether a bicyclists will
+injure from an incident and understand the factors that is important to
+the prediction of injury risks. In that way, we can adopt preventive
+measures to reduce the risk of injury and thus protect bicyclists.
+
+### Data description
+
+![](image/bikemaps.png)
+
+The data collection happens at this website: <https://bikemaps.org>.
+Cyclists can drop a point on the interactive map on the website and they
+will be invited to fill out a survey. The data is available at this
+link: <https://bikemaps.org/incidents-only.json>. As most of the
+questions are multiple choice, most variables we can leverage are
+categorical variables. Here are the list of the variables:
+
+-   `i_type`:incident type
+
+-   `incident_with`: the object with which the incident happened with
+
+-   `date`: date of the incident
+
+-   `p_type`:incident type with more information
+
+-   `personal_involvement`: whether the person who report the incident
+    is involved in the incident (otherwise as witness)
+
+-   `details`: text description of what happen
+
+-   `impact`: whether the incident has any impact on the reporter's
+    decision of future biking behavior
+
+-   `injury`: degree of injury caused by the incident
+
+-   `trip_purpose`: whether the trip is for commute, recreation, social,
+    personal business or during work
+
+-   `regular_cyclist`: whether the cyclist who involved in the incident
+    is a regular cyclist or not
+
+-   `helmet`: whether the cyclist who involved in the incident wear a
+    helmet or not
+
+-   `road_conditions`: the road condition is dry, wet, icy or snowy
+
+-   `sightlines`: the condition of sightlines while the incident
+    happened
+
+-   `cars_on_roadside`: whether there are cars on the road side or not
+    while the incident happened
+
+-   `bike_lights`: whether the cyclist used bike light `terrain`: the
+    terrain where the incident happened
+
+-   `aggressive`: removed from the questionnaire
+
+-   `intersection`: whether the incident happened at an intersection
+
+-   `witness_vehicle`: removed from the questionnaire
+
+-   `bicycle_type`: type of bike involved in the incident `ebike`:
+    whether the bike involved is an ebike
+
+-   `ebike_class`: if it is an ebike what is the ebike class
+
+-   `ebike_speed`: if it is an ebike what is the ebike speed
+
+-   `direction` : the direction cyclist was heading
+
+-   `turning`: how the cyclist was moving, heading straight, turning
+    left or right
+
+-   `age`: age of the reporter
+
+-   `gender`: gender of the reporter
+
+-   `birthmonth`: birth month of the reporter
+
+-   `pk`: index of the incident report
+
+-   `longitude`: longitude of the place where the incident took place
+
+-   `latitude`: latitude of the place where the incident took place
+
+### Project Roadmap
+
+I will first clean and manipulate the data before performing exploratory
+data analysis to get a better sense of the variables. Our goal is to
+predict a binary class of whether a bicylist is injured or not from the
+incident details provided. We will perform a train/test split on the
+data, set folds for 5-folds cross validation and make a recipe.
+K-nearest neighbor, Logistic regression, Elastic net and Random forest
+will be applied to model the training data. I will then augment the best
+performing model on our testing data and see how good my model is able
+to predict injury.
+
+## Data Cleaning and manipulation
+
+### Loading raw data
+
+First let's look at what we have in our data.
+
+```{r class.source = 'fold-show'}
+data <- read_csv("world.xlsx - Incident.csv")
+colnames(data)
+```
+
+There's a lot of variables! However, not all of them are relevant in
+predicting injury. Let's remove the temporal and spatial information,
+details (text information), impact of the injury and pk (the incident
+index) and direction.
+
+Bikemaps.org started to collect bike incidents from the public from
+2014. In this study, we only excerpt the data after December 2016
+because that's when users can identify whether they are on an e-bike in
+the report survey. I think it will be interesting to see if factoring in
+e-bike can help predict injury level from bike incidents. So before
+dropping the temporal information, we will filter the data first.
+
+```{r class.source = 'fold-show'}
+library(dplyr)
+data <- data %>% dplyr::filter(date > as.Date('2016-11-30')) 
+
+data <- data %>%
+  #drop column that are not related to injury prediction
+  dplyr::select(-c(date,details,birthmonth,impact,pk,longitude,latitude,direction))
+```
+
+In addition, if the reporter is not involved in the incident, the age
+and gender information is not relevant for predict the injury. So we
+will see how many reports are generated by persons that are not directly
+involved in the incident but witnesses themselves. If not too many we
+will drop them as well.
+
+```{r}
+summary(as.factor(data$personal_involvement))
+```
+
+It seems around 15% of the reports are added by witness. We will drop
+those and assume the NA's are self-reported (I know, this is a big
+assumption.. But the NA' also consisted of more than 8% of all data, so
+we will keep them with this assumption in mind when we draw conclusion
+from the analysis.)
+
+```{r}
+data <- data %>%
+  filter(is.na(personal_involvement)|personal_involvement!="No") %>% 
+  select(-personal_involvement)
+```
+
+### Missing Data Visualization
+
+Now let's see how many missing data we have and decide how we can deal
+with them.
+
+```{r,echo=FALSE}
+# missing data
+#install.packages("naniar")
+library(naniar)
+vis_miss(data)
+```
+
+That's a lot of missing data... It doesn't make sense to impute for
+those column that has more than 50% missing. Let's drop those column.
+
+```{r class.source = 'fold-show'}
+#drop all column with more than 50% missing
+data <- data %>% 
+  purrr::discard(~sum(is.na(.x))/length(.x)* 100 >=50)
+```
+
+```{r,echo=FALSE}
+vis_miss(data)
+```
+
+That looks better! Let's start our data exploration!
+
+## EDA
+
+Since it is all categorical data that we are using, so we will not make
+a correlation plot. But we will make separate plots for some variables
+to get a sense of whether they will be suitable predictors to include in
+our final recipe.
+
+### Outcome variable
+
+There are six levels in our outcome variable but some levels have very
+limited cases. Therefore, we will collapse the levels into binary
+classes: injury and no injury. Also we can see a significant imbalance
+of levels: many No jury's! We will need to deal with the imbalance when
+we set up the model later on.
+
+```{r,echo=FALSE}
+data <- data %>% 
+  mutate_if(is.character,as.factor)
+
+summary(data$injury)
+```
+
+```{r,echo=FALSE}
+#install.packages("forcats")
+library(forcats)
+
+data1 <- data %>% 
+  mutate(injury_level = fct_collapse(injury,N=c("No injury"),
+                                    Y=c("Injury, no treatment",
+                                        "Injury, hospitalized",
+                                        "Injury, saw family doctor",
+                                        "Injury, hospital emergency visit"),
+                                    Unknown=c("Unknown"),
+                                    level=c("N","Y","C"))) %>% 
+  select(-injury)
+# the factor label can't not be the same as the level
+```
+
+```{r,echo=FALSE}
+ggplot(data1, aes(reorder(x=injury_level,injury_level,function(x)-length(x)))) + geom_bar(stat="count",fill="#20908c") +
+  labs(y = "Injury") +
+  coord_flip()
+```
+
+That looks much better! We will deal with the unknowns later.
+
+### Predictors
+
+#### Report type (p_type) and incident type (i_type)
+
+From the following graph, we can see that the `i_type` is perfectly
+separable by `p_type`. Since `i_type` includes more information than
+`p_type` so we will keep `i_type` and drop `p_type`.
+
+```{r,echo=FALSE}
+ggplot(data1,aes(x=p_type,fill=i_type)) +
+  geom_bar(position="fill") +
+  scale_fill_viridis (discrete = T) +
+  coord_flip()
+
+```
+
+```{r class.source = 'fold-show'}
+data2 <- data1 %>% 
+  select(-p_type)
+```
+
+By looking at the percentage stack bar chart, we are able to tell that
+people that were involved in a near-miss would have a much lower chance
+of getting injury than an actual collision. Therefore, `i_type` will be
+a very strong predictor of injury level.
+
+```{r}
+ggplot(data1,aes(x=i_type,fill=injury_level)) +
+  geom_bar(position="fill") +
+  scale_fill_viridis(discrete = T) +
+  coord_flip()
+```
+
+#### Incident with
+
+The object that cyclists had incident with can be important for
+predicting the injury level. However, there are 19 levels in this
+variable, which does not work great for the model. We will collapse all
+vehicle related levels and lump those less than 80 (5%) occurances into
+`Others`. One might thinks that a collision with a pedestrian might be
+less serious than with a vehicle. However, we see from the stack bar
+chart that it seems vehicles has a lower injury rate that the rest. I
+guess that's because there are far more incidents with vehicle than with
+the others, which causes the pattern we saw here. Nonetheless, this is
+an important piece of information to help our model to correctly predict
+injury.
+
+```{r,echo=FALSE}
+#visualize predictor variable
+# p <- ggplot(data1, aes(x=reorder(incident_with, incident_with, function(x)-length(x))))
+# p + geom_bar() + 
+#   geom_text(stat="count",aes(label=..count..), vjust= 0) + 
+#  coord_flip()
+
+
+# lump incidents with vehicles
+data2 <- data2 %>% 
+  mutate(incident_with = fct_collapse(incident_with, vehicle = 
+                                        c("Vehicle, turning right",
+                                          "Vehicle, head on",
+                                          "Vehicle, passing",
+                                          "Vehicle, turning left",
+                                          "Vehicle, angle",
+                                          "Vehicle, rear end",
+                                          "Vehicle, side",
+                                          "Vehicle, open door"),
+                                      bicyclist = "Another cyclist",
+                                      pedestrian = "Pedestrian",
+                                      other_level = "other"))
+
+q <- ggplot(data2, aes(x=incident_with, fill=injury_level))
+q + geom_bar(position="fill") + 
+  scale_fill_viridis(discrete = T) +
+  coord_flip()
+```
+
+#### Gender
+
+Literature seems to agree that female are more likely to get injured in
+incidents than other gender. Therefore, we includegender to predict
+injury. However, from our graph here, we don't see a clear trend.
+
+```{r,echo=FALSE}
+library(patchwork)
+
+#regroup outcome
+data2 <- data2 %>% 
+  mutate(gender = fct_collapse(gender,M=c("M"),
+                               F=c("F"),
+                               O=c("O","NBY","P"))) 
+
+gender <- ggplot(data2,aes(x=gender,fill=injury_level)) 
+gender + geom_bar(position="fill") +
+    scale_fill_viridis(discrete = T)
+
+```
+
+### Handle Unknowns
+
+You might have seen that, in this dataset we have "I don't know", "Don't
+remember", "Don't Remember","I don't remember","Unknown" as part of the
+reponses. Therefore, we will turn them all into NA's. Once we do that,
+we will drop the empty levels and order the levels by frequency. Lastly,
+since it is not appropriate to impute for those entries a NA outcome, we
+will simply drop those doesn't specify injury_level.
+
+```{r}
+#convert data into NA
+values_to_convert <- c("I don't know", "Don't remember",  "Don't Remember","I don't remember","Unknown")
+# Use dplyr to convert values to NA in the entire dataset
+
+data3 <- data2 %>%
+  mutate_if(is.factor, ~replace(., . %in% values_to_convert, NA)) %>%
+     mutate(across(where(is.factor), ~fct_drop(.))) %>% 
+      #drop the changed factors
+      mutate_if(is.factor,~fct_infreq(.))
+      #reorder factor level by frequency (start with most frequent)
+
+#drop NAs in the outcome variable
+data3 <- data3 %>%
+  drop_na(injury_level)
+```
+
+## Setting up Models
+
+### Split data
+
+We will split our data into train/testing set. To account for the class
+imbalance in our outcome variable, we will use stratifed sampling. The
+same technique is applied when we creat the data folds for cross
+validation.
+
+```{r class.source = 'fold-show'}
+##split data
+set.seed(3435)
+data_split <- initial_split(data3, strata = "injury_level", prop = 0.75)
+
+data_train <- training(data_split)
+data_test <- testing(data_split)
+
+data_fold <- vfold_cv(data_train, v = 5, 
+                      strata = "injury_level")
+```
+
+Dimension for training and testing set
+
+```{r,echo=FALSE}
+dim(data_train)
+dim(data_test)
+```
+
+### Build recipe
+
+With all the ingredients ready, now we are ready to build a recipe!
+After data exploration, we end up with 15 predictors and 1 binary
+outcome variable.
+
+Remember we still have a lot of NA's in our dataset: we will use
+bootstrap aggregation (bag) tree technique to impute for NA's in the 15
+predictors. Here's how it works: "for each variable requiring
+imputation, a bagged tree is created where the outcome is the variable
+of interest and the predictors are any other variables listed in the
+impute_with formula. One advantage to the bagged tree is that is can
+accept predictors that have missing values themselves." In this recipe,
+I didn't sepcify "impute with" so it will use all the predictor
+variables in my dataset to impute the NA's.
+
+The last step of my recipe is to upsample my outcome variable with a
+ratio 0.5. It means it will upsample the "Yes" category to half of the
+"No". Package `themis` helps to do the work.
+
+```{r class.source = 'fold-show'}
+#install.packages("themis")
+library(themis)
+
+data_recipe <- recipe(injury_level ~ . , data = data_train) %>%
+  step_impute_bag(i_type , incident_with,
+                  trip_purpose, regular_cyclist , helmet , 
+                  road_conditions , sightlines , cars_on_roadside ,
+                  bike_lights , terrain , bicycle_type , ebike , 
+                  turning , age , gender,impute_with = imp_vars(all_predictors())) %>% 
+    step_dummy(all_nominal_predictors()) %>% 
+    step_upsample(injury_level, over_ratio = 0.5, skip = TRUE)
+```
+
+## Building Prediction Models
+
+In this study, I selected four models to predict injury from bike
+incidents: K Nearest Neighbors, Logistic regression, Elastic Net and
+Random Forest. We will set up workflow, tune hyperparameters, finalize
+our workflow by incorporating the best performing hyperparameter
+selected based on the metric area under the ROC curve.
+
+### Workflow
+
+```{r class.source = 'fold-show'}
+#install.packages("ranger")
+library(ranger)
+library(yardstick)
+```
+
+Set up workflow for K Nearest Neighbors
+
+```{r class.source = 'fold-show'}
+#knn
+mod_knn <- nearest_neighbor(neighbors = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("kknn")
+
+wf_knn <- workflow() %>%
+  add_model(mod_knn) %>% 
+  add_recipe(data_recipe)
+```
+
+Set up workflow for Logistic Regression
+
+```{r class.source = 'fold-show'}
+#logistic 
+mod_lr <- logistic_reg() %>% 
+  set_mode("classification") %>% 
+  set_engine("glm")
+
+wf_lr <- workflow() %>%
+  add_model(mod_lr) %>% 
+  add_recipe(data_recipe)
+```
+
+Set up workflow for Elastic Net
+
+```{r class.source = 'fold-show'}
+#logistic elastic net 
+mod_en <- logistic_reg(penalty = tune(),
+                           mixture = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet")
+
+wf_en <- workflow() %>%
+  add_model(mod_en) %>% 
+  add_recipe(data_recipe)
+
+```
+
+For the random forest model, since we have 15 variables in total, so the
+meaningful m_try will be from 1 to 15. Since our dataset is relatively
+big so to save time, we will fix number of trees and minimal nodes to
+focus on tuning m_try. From the first few trials I figured that number
+of trees and minimal nodes did not impact the outcome too much. So I
+chose 600 and 25 to reduce run time. I add `importance = "impurity"` so
+that at the end we can make an importance plot to see what are the
+important variables in the prediction process.
+
+```{r class.source = 'fold-show'}
+#random forest
+rf_mod <- rand_forest(
+  mtry = tune(),
+  trees = 600,
+  min_n = 25
+) %>%
+  set_mode("classification") %>%
+  set_engine("ranger",importance = "impurity")
+
+rf_wkflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(data_recipe)
+```
+
+### Tune model
+
+```{r, eval=FALSE,echo=FALSE}
+# random forest
+rf_grid  <- grid_regular(mtry(range = c(1L,15L)),
+                        levels = 5)
+
+#1-10 shows a increasing trend of auc from 0.80-0.86, 10-50 shows increasing from 0.79-0.86
+# knn
+knn_grid <- grid_regular(neighbors(range = c(50,500)),
+                         levels = 5)
+
+# elastic net
+# putting penalty range from 0-1 shows that 0 mixture and penalty will work the best, will try smaller range to see if different
+en_grid <- grid_regular(penalty(range = c(0.01,3),trans = 
+                                  identity_trans()),
+                        mixture(range = c(0, 1)), 
+                        levels = 10)
+```
+
+```{r,eval=FALSE, echo=FALSE}
+# tune random forest
+rf_results_9 <- tune_grid(rf_wkflow,
+                          resamples = data_fold,
+                          grid = rf_grid)
+```
+
+```{r,eval=FALSE,echo=FALSE}
+# tune knn
+tune_res_knn_1 <- tune_grid(
+  wf_knn,
+  resamples = data_fold,
+  grid = knn_grid
+)
+save(tune_res_knn_1, file="20231214knn_results.rda")
+```
+
+```{r,eval=FALSE,echo=FALSE}
+# tune elastic net
+tune_res_en <- tune_grid(
+  wf_en,
+  resamples = data_fold, 
+  grid = en_grid
+)
+save(tune_res_en, file="20231214en_results.rda")
+```
+
+Let's see the tuning results of the three models. We will select the
+best performing hyperparameters to finalize our workflow. In both random
+forest and knn, we see a bell curve. It is less clear for elatistic net,
+so we will leave it for `select_best()` to help us decide.
+
+```{r,echo=FALSE}
+library(vip)
+load("20231214rf_results_9.rda")
+load("20231214knn_results.rda")
+load("20231214en_results.rda")
+
+# plot the tune results
+autoplot(rf_results_9)
+autoplot(tune_res_knn_1)
+autoplot(tune_res_en)
+```
+
+```{r,echo=FALSE}
+# select the best parameter
+best_rf <- select_best(rf_results_9)
+best_knn <- select_best(tune_res_knn_1,metric = "accuracy")
+best_en <- select_best(tune_res_en)
+```
+
+```{r,echo=FALSE}
+#finalize workflow
+rf_final <- finalize_workflow(rf_wkflow, best_rf)
+knn_final <- finalize_workflow(wf_knn, best_knn)
+en_final <- finalize_workflow(wf_en, best_en)
+```
+
+### Training data fit
+
+Now we have the finalized workflow, we can use cross validation to fit
+the model and get a averaged value of training auc value.
+
+```{r,eval=FALSE}
+#fit to train set
+rf_fit <- fit_resamples(
+  rf_final,
+  resamples = data_fold,
+  control = control_resamples(save_pred = TRUE))
+save(rf_fit,file="20231214rffit.rda")
+```
+
+```{r,eval=FALSE}
+#knn
+knn_fit <-fit_resamples(
+  knn_final,
+  resamples = data_fold,
+  control = control_resamples(save_pred = TRUE))
+save(knn_fit,file="20231214knnfit.rda")
+
+#en
+en_fit <-fit_resamples(
+  en_final,
+  resamples = data_fold,
+  control = control_resamples(save_pred = TRUE))
+save(en_fit,file="20231214enfit.rda")
+
+#lr
+lr_fit <- fit_resamples(
+  wf_lr,
+  resamples = data_fold,
+  control = control_resamples(save_pred = TRUE))
+save(lr_fit,file="20231214lrfit.rda")
+```
+
+```{r,echo=FALSE}
+load("20231214rffit.rda")
+load("20231214knnfit.rda")
+load("20231214enfit.rda")
+load("20231214lrfit.rda")
+```
+
+```{r,echo=FALSE}
+models <- c("random forest","knn","elastic net","logistic regression")
+cbind(models,
+        rbind(collect_metrics(rf_fit),
+      collect_metrics(knn_fit),
+      collect_metrics(en_fit),
+      collect_metrics(lr_fit)) %>% 
+  filter(.metric == "roc_auc")) %>% 
+  select(c("models","mean","std_err"))
+```
+
+All the models seem to perform very well! They all have an auc value
+higher than 90%. Elastic Net and logistic regression end up with very
+similar results. I assume that's because the penalty applied is very
+limited (0.1) therefore it doesn't restrict the coefficient too much.
+
+## Best Model Test Results
+
+Finally, we will see how they perform on the testing data! This will be
+a fairer metric than training auc because the model never sees this part
+of the dataset at all. I selected random forest, which seems to perform
+best according to the performance on the training dataset.
+
+```{r,eval=FALSE}
+# fit to test data
+# visualize accuracy
+rf_train_fit <- fit(rf_final,data_train)
+save(rf_train_fit,file="rf_train_fit.rda")
+```
+
+```{r,echo=FALSE}
+load("rf_train_fit.rda")
+```
+
+```{r,echo=FALSE}
+augment(rf_train_fit,data_test) %>% 
+  conf_mat(truth = injury_level, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+augment(rf_train_fit,new_data=data_test) %>%  
+  roc_curve(injury_level,.pred_N) %>% 
+  autoplot()
+augment(rf_train_fit,new_data=data_test) %>%  
+  roc_auc(injury_level,.pred_N)
+```
+
+According to the heatmap and ROC, we can see the model perform pretty
+good on the testing data. Woohoo!
+
+## Inference
+
+Finally, like I said in the introduction, I am also interested in seeing
+what are the important factors in predicting injury. We will look at the
+importance plot from random forest and coefficient plot from logistic
+regression to infer causual relationships.
+
+```{r,echo=FALSE}
+#importance plot
+#install.packages("vip")
+#install.packages("janitor")
+library(vip)
+library(janitor)
+
+rf_train_fit %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point")
+```
+
+```{r,echo=FALSE}
+get_lm_coefs <- function(x) {
+  x %>% 
+    # get the lr model object
+    extract_fit_engine() %>% 
+    # transform its format
+    tidy()
+}
+tidy_ctrl <- control_grid(extract = get_lm_coefs)
+```
+
+```{r,echo=FALSE}
+lr_fit <- fit_resamples(
+  wf_lr,
+  resamples = data_fold,
+  control = tidy_ctrl)
+save(lr_fit,file="20231215lr_fit_coef.rda")
+```
+
+```{r,echo=FALSE}
+load("20231215lr_fit_coef.rda")
+```
+
+```{r,echo=FALSE}
+lr_coefs <- 
+  lr_fit %>% 
+  select(id, .extracts) %>% 
+  unnest(.extracts) %>% 
+  unnest(.extracts)
+
+lr_coefs %>%
+  filter(term != "(Intercept)") %>% 
+  ggplot(aes(x = term, y = estimate, group = id, col = id)) +  
+  geom_hline(yintercept = 0, lty = 3) + 
+  geom_line(alpha = 0.3, lwd = 1.2) + 
+  labs(y = "Coefficient", x = NULL) +
+  theme(legend.position = "top") +
+  coord_flip()
+```
+
+Both graphs show that i_type is the most important/significant predictor
+of injury. It turns out that age does play a small role in the
+prediction as well. The two models seem to pick up similar pattern in
+the dataset as both shows trip purpose (during work), terrain (downhill)
+and gender (female) are important predictors.
+
+## Conclusion
+
+In this study, I explore the crowdsourced bike incident dataset and set
+up four machine learning models to predict the binary outcome of injured
+or not in an incident. It turns out that all four models were able to
+reach a training AUC above 0.9. Among them, random forest model
+performed the best (AUC = 0.93).
+
+This study has a couple of limitations. First, the dataset is heavily
+biased towards no injury outcome (70%). That's why I used upsampling to
+account for the imbalance. Future studies can consider algorithms or
+models to handle imbalanced classes, such as Random Forest With Class
+Weighting and naive classifier. As we can see in the importance plot,
+incident type is the strongest predictor. That's because most of the
+reports are near-miss (72%), which can simply imply no injury most of
+the time. Therefore, it might be interesting to see how the model will
+change if we take out this highly predictive vairable if we want to
+figure out what are the other variables that are contributing to the
+injury level. Lastly, since I imputed for 21% of the data in this study,
+I could have brought in significant assumption into the study.
+
+In conclusion, I found that random forest is the best performing model
+for predicting injury in bike incidents (AUC = 0.93) and incident type
+is most useful predictor.
